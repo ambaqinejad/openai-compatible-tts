@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.core.worker import TTSJob
 
 from app.audio.chunker import chunk_text
 from app.audio.processor import concatenate_audio
@@ -190,26 +191,49 @@ async def create_speech(
 
         audio_chunks = []
 
+        audio_chunks = []
+
+        tts_worker = request.app.state.tts_worker
+
         for index, chunk in enumerate(
-            chunks,
-            start=1,
+                chunks,
+                start=1,
         ):
 
             print(
                 f"[TTS] request_id={request_id} "
                 f"chunk={index}/{len(chunks)} "
-                f"characters={len(chunk)}"
+                f"characters={len(chunk)} "
+                f"queue={tts_worker.queue.qsize()}"
             )
 
-            audio = model_manager.generate(
+            job = TTSJob(
                 text=chunk,
                 ref_audio=voice["ref_audio"],
                 language=body.language,
                 ref_text=voice["ref_text"],
             )
 
-            if not audio:
+            try:
 
+                audio = await tts_worker.submit(
+                    job
+                )
+
+            except RuntimeError as exc:
+
+                if "queue is full" in str(exc).lower():
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            "TTS queue is full. "
+                            "Please try again later."
+                        ),
+                    )
+
+                raise
+
+            if not audio:
                 raise RuntimeError(
                     f"OmniVoice returned empty audio "
                     f"for chunk {index}."

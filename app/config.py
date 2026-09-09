@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     max_input_characters: int = 100_000
     max_chunk_characters: int = 600
 
+    max_queue_size: int = 50
 
     # ============================================================
     # Config

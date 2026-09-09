@@ -1,0 +1,77 @@
+services:
+
+  omnivoice-api:
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: base-torch-ffmpeg:latest
+
+    image: omnivoice-api:latest
+
+    container_name: omnivoice-api
+
+    restart: unless-stopped
+
+    ports:
+      - "8003:8000"
+
+    gpus: all
+
+    env_file:
+      - .env
+
+    environment:
+
+      # ======================================================
+      # Hugging Face
+      # ======================================================
+
+      HF_HOME: /models/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+
+      # ======================================================
+      # Python
+      # ======================================================
+
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+
+      # ======================================================
+      # Application source
+      # ======================================================
+      # تغییرات app بدون rebuild داخل container دیده می‌شود.
+
+      - ./app:/app/app
+
+      # ======================================================
+      # Voices
+      # ======================================================
+
+      - ./voices:/app/voices
+
+      # ======================================================
+      # Generated audio
+      # ======================================================
+
+      - ./output:/app/output
+
+      # ======================================================
+      # Hugging Face models/cache
+      # ======================================================
+
+      - "./models:/models/huggingface:ro"
+
+    healthcheck:
+
+      test:
+        ["CMD","python3","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+        ]
+
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

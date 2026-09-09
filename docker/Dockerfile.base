@@ -1,0 +1,58 @@
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+# ============================================================
+# System dependencies
+# ============================================================
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ffmpeg \
+        libsndfile1 \
+        ca-certificates \
+        tini && \
+    rm -rf /var/lib/apt/lists/*
+
+# ============================================================
+# Python
+# ============================================================
+
+RUN python3 --version && \
+    python3 -m pip --version
+
+# ============================================================
+# PyTorch
+# ============================================================
+
+COPY requirements.base.txt /tmp/requirements.base.txt
+
+RUN python3 -m pip install \
+        --break-system-packages \
+        -r /tmp/requirements.base.txt && \
+    rm -f /tmp/requirements.base.txt
+
+# ============================================================
+# Verify
+# ============================================================
+
+RUN python3 - <<'PY'
+import torch
+import torchaudio
+
+print("=" * 60)
+print("PyTorch:", torch.__version__)
+print("TorchAudio:", torchaudio.__version__)
+print("CUDA available:", torch.cuda.is_available())
+
+if torch.cuda.is_available():
+    print("CUDA version:", torch.version.cuda)
+    print("GPU count:", torch.cuda.device_count())
+
+print("=" * 60)
+PY

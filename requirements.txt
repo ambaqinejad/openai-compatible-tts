@@ -1,8 +1,7 @@
 fastapi
 uvicorn[standard]
+pydantic
 pydantic-settings
-python-dotenv
-
-torch
-omnivoice
+numpy
 soundfile
+omnivoice
