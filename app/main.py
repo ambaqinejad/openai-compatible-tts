@@ -7,10 +7,18 @@ from app.core.model import OmniVoiceModelManager
 from app.core.worker import TTSWorker
 from app.api.speech import router as speech_router
 
+from app.api.jobs import router as jobs_router
+from app.core.job_manager import TTSJobManager
+
 
 model_manager = OmniVoiceModelManager()
 
 tts_worker = TTSWorker(
+    model_manager=model_manager,
+    max_queue_size=settings.max_queue_size,
+)
+
+job_manager = TTSJobManager(
     model_manager=model_manager,
     max_queue_size=settings.max_queue_size,
 )
@@ -33,6 +41,10 @@ async def lifespan(app: FastAPI):
 
         app.state.tts_worker = tts_worker
 
+        await job_manager.start()
+
+        app.state.job_manager = job_manager
+
         print("=" * 60)
         print("OmniVoice API is READY")
         print("=" * 60)
@@ -52,6 +64,8 @@ async def lifespan(app: FastAPI):
         "Shutting down OmniVoice API..."
     )
 
+    await job_manager.stop()
+
     await tts_worker.stop()
 
     model_manager.unload()
@@ -67,6 +81,8 @@ app = FastAPI(
 app.include_router(
     speech_router
 )
+
+app.include_router(jobs_router)
 
 
 @app.get("/health")
