@@ -4,7 +4,14 @@ import uuid
 
 import soundfile as sf
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -15,6 +22,7 @@ from app.audio.chunker import chunk_text
 from app.audio.processor import concatenate_audio
 from app.audio.ffmpeg import convert_wav_to_mp3
 
+
 router = APIRouter(
     prefix="/v1/audio",
     tags=["audio"],
@@ -23,39 +31,22 @@ router = APIRouter(
 
 VOICE_ROOT = Path("voices")
 OUTPUT_ROOT = Path("output")
+CLONE_ROOT = Path("output/voice-clone")
 
+
+# ============================================================
+# Existing OpenWebUI TTS API
+# ============================================================
 
 class SpeechRequest(BaseModel):
-
-    model: str = Field(
-        default="omnivoice",
-        description="TTS model name",
-    )
-
-    input: str = Field(
-        ...,
-        min_length=1,
-        description="Text to synthesize",
-    )
-
-    voice: str = Field(
-        default="default",
-        description="Voice name",
-    )
-
-    response_format: str = Field(
-        default="wav",
-        description="Audio format",
-    )
-
-    language: str = Field(
-        default="Persian",
-        description="Input language",
-    )
+    model: str = Field(default="omnivoice")
+    input: str = Field(..., min_length=1)
+    voice: str = Field(default="default")
+    response_format: str = Field(default="wav")
+    language: str = Field(default="Persian")
 
 
 def load_voice(voice_name: str):
-
     voice_dir = VOICE_ROOT / voice_name
 
     if not voice_dir.exists():
@@ -107,9 +98,7 @@ async def create_speech(
     request: Request,
     body: SpeechRequest,
 ):
-
     if len(body.input) > settings.max_input_characters:
-
         raise HTTPException(
             status_code=413,
             detail=(
@@ -120,7 +109,6 @@ async def create_speech(
         )
 
     if body.model != "omnivoice":
-
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported model: {body.model}",
@@ -130,11 +118,11 @@ async def create_speech(
         "wav",
         "mp3",
     }:
-
         raise HTTPException(
             status_code=400,
             detail=(
-                "Supported response formats: wav, mp3."
+                "Supported response formats: "
+                "wav, mp3."
             ),
         )
 
@@ -143,7 +131,6 @@ async def create_speech(
     model_manager = request.app.state.model_manager
 
     if not model_manager.loaded:
-
         raise HTTPException(
             status_code=503,
             detail="TTS model is not ready.",
@@ -152,31 +139,21 @@ async def create_speech(
     request_id = uuid.uuid4().hex
 
     output_dir = OUTPUT_ROOT
-
     output_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    wav_path = (
-        output_dir /
-        f"{request_id}.wav"
-    )
-
-    mp3_path = (
-        output_dir /
-        f"{request_id}.mp3"
-    )
+    wav_path = output_dir / f"{request_id}.wav"
+    mp3_path = output_dir / f"{request_id}.mp3"
 
     try:
-
         chunks = chunk_text(
             body.input,
             max_length=settings.max_chunk_characters,
         )
 
         if not chunks:
-
             raise ValueError(
                 "Input text produced no chunks."
             )
@@ -191,15 +168,12 @@ async def create_speech(
 
         audio_chunks = []
 
-        audio_chunks = []
-
         tts_worker = request.app.state.tts_worker
 
         for index, chunk in enumerate(
-                chunks,
-                start=1,
+            chunks,
+            start=1,
         ):
-
             print(
                 f"[TTS] request_id={request_id} "
                 f"chunk={index}/{len(chunks)} "
@@ -215,7 +189,321 @@ async def create_speech(
             )
 
             try:
+                audio = await tts_worker.submit(
+                    job
+                )
 
+            except RuntimeError as exc:
+                if "queue is full" in str(exc).lower():
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            "TTS queue is full. "
+                            "Please try again later."
+                        ),
+                    )
+
+                raise
+
+            if not audio:
+                raise RuntimeError(
+                    f"OmniVoice returned empty audio "
+                    f"for chunk {index}."
+                )
+
+            audio_chunks.append(audio[0])
+
+        final_audio = concatenate_audio(
+            audio_chunks,
+            silence_ms=80,
+            sample_rate=settings.output_sample_rate,
+        )
+
+        sf.write(
+            str(wav_path),
+            final_audio,
+            settings.output_sample_rate,
+            format="WAV",
+        )
+
+        if body.response_format == "wav":
+            return FileResponse(
+                path=str(wav_path),
+                media_type="audio/wav",
+                filename="speech.wav",
+                headers={
+                    "X-Request-ID": request_id
+                },
+            )
+
+        convert_wav_to_mp3(
+            input_path=wav_path,
+            output_path=mp3_path,
+            bitrate=settings.mp3_bitrate,
+        )
+
+        wav_path.unlink(
+            missing_ok=True
+        )
+
+        return FileResponse(
+            path=str(mp3_path),
+            media_type="audio/mpeg",
+            filename="speech.mp3",
+            headers={
+                "X-Request-ID": request_id
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print(
+            f"[TTS] failed "
+            f"request_id={request_id} "
+            f"error={exc}"
+        )
+
+        if wav_path.exists():
+            wav_path.unlink()
+
+        if mp3_path.exists():
+            mp3_path.unlink()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"TTS generation failed: {exc}"
+            ),
+        )
+
+
+# ============================================================
+# Zero-Shot Voice Cloning API
+# ============================================================
+
+@router.post("/voice-clone")
+async def create_voice_clone(
+    request: Request,
+
+    text: str = Form(...),
+    reference_text: str = Form(...),
+    language: str = Form(default="English"),
+    response_format: str = Form(default="wav"),
+
+    reference_audio: UploadFile = File(...),
+):
+    """
+    Generate speech using zero-shot voice cloning.
+
+    The uploaded reference audio is used as the speaker
+    reference and reference_text must be the transcription
+    of that audio.
+    """
+
+    # --------------------------------------------------------
+    # Validate text
+    # --------------------------------------------------------
+
+    text = text.strip()
+    reference_text = reference_text.strip()
+    language = language.strip()
+
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="Text cannot be empty.",
+        )
+
+    if not reference_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Reference text cannot be empty.",
+        )
+
+    if len(text) > settings.max_input_characters:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Input text is too long. "
+                f"Maximum allowed characters: "
+                f"{settings.max_input_characters}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Validate response format
+    # --------------------------------------------------------
+
+    if response_format not in {
+        "wav",
+        "mp3",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Supported response formats: "
+                "wav, mp3."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Validate reference audio
+    # --------------------------------------------------------
+
+    if not reference_audio.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Reference audio filename is missing.",
+        )
+
+    allowed_extensions = {
+        ".wav",
+        ".mp3",
+        ".flac",
+        ".ogg",
+        ".m4a",
+        ".aac",
+    }
+
+    extension = Path(
+        reference_audio.filename
+    ).suffix.lower()
+
+    if extension not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported reference audio format. "
+                f"Supported formats: "
+                f"{', '.join(sorted(allowed_extensions))}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Check model
+    # --------------------------------------------------------
+
+    model_manager = request.app.state.model_manager
+
+    if not model_manager.loaded:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS model is not ready.",
+        )
+
+    # --------------------------------------------------------
+    # Request ID / paths
+    # --------------------------------------------------------
+
+    request_id = uuid.uuid4().hex
+
+    request_dir = (
+        CLONE_ROOT / request_id
+    )
+
+    request_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    reference_path = (
+        request_dir
+        / f"reference{extension}"
+    )
+
+    wav_path = (
+        request_dir
+        / f"{request_id}.wav"
+    )
+
+    mp3_path = (
+        request_dir
+        / f"{request_id}.mp3"
+    )
+
+    try:
+
+        # ----------------------------------------------------
+        # Save uploaded reference audio
+        # ----------------------------------------------------
+
+        with open(
+            reference_path,
+            "wb",
+        ) as f:
+
+            while True:
+                chunk = await reference_audio.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                f.write(chunk)
+
+        await reference_audio.close()
+
+        print(
+            f"[VOICE CLONE] "
+            f"request_id={request_id} "
+            f"text_characters={len(text)} "
+            f"reference={reference_path} "
+            f"language={language} "
+            f"format={response_format}"
+        )
+
+        # ----------------------------------------------------
+        # Split long text
+        # ----------------------------------------------------
+
+        chunks = chunk_text(
+            text,
+            max_length=settings.max_chunk_characters,
+        )
+
+        if not chunks:
+            raise ValueError(
+                "Input text produced no chunks."
+            )
+
+        print(
+            f"[VOICE CLONE] "
+            f"request_id={request_id} "
+            f"chunks={len(chunks)}"
+        )
+
+        # ----------------------------------------------------
+        # Generate audio
+        # ----------------------------------------------------
+
+        audio_chunks = []
+
+        tts_worker = request.app.state.tts_worker
+
+        for index, chunk in enumerate(
+            chunks,
+            start=1,
+        ):
+
+            print(
+                f"[VOICE CLONE] "
+                f"request_id={request_id} "
+                f"chunk={index}/{len(chunks)}"
+            )
+
+            job = TTSJob(
+                text=chunk,
+                ref_audio=str(
+                    reference_path.resolve()
+                ),
+                language=language,
+                ref_text=reference_text,
+            )
+
+            try:
                 audio = await tts_worker.submit(
                     job
                 )
@@ -243,11 +531,19 @@ async def create_speech(
                 audio[0]
             )
 
+        # ----------------------------------------------------
+        # Concatenate generated chunks
+        # ----------------------------------------------------
+
         final_audio = concatenate_audio(
             audio_chunks,
             silence_ms=80,
             sample_rate=settings.output_sample_rate,
         )
+
+        # ----------------------------------------------------
+        # Save WAV
+        # ----------------------------------------------------
 
         sf.write(
             str(wav_path),
@@ -256,16 +552,24 @@ async def create_speech(
             format="WAV",
         )
 
-        if body.response_format == "wav":
+        # ----------------------------------------------------
+        # Return WAV
+        # ----------------------------------------------------
+
+        if response_format == "wav":
 
             return FileResponse(
                 path=str(wav_path),
                 media_type="audio/wav",
-                filename="speech.wav",
+                filename="voice-clone.wav",
                 headers={
-                    "X-Request-ID": request_id,
+                    "X-Request-ID": request_id
                 },
             )
+
+        # ----------------------------------------------------
+        # Convert WAV -> MP3
+        # ----------------------------------------------------
 
         convert_wav_to_mp3(
             input_path=wav_path,
@@ -273,32 +577,53 @@ async def create_speech(
             bitrate=settings.mp3_bitrate,
         )
 
-        wav_path.unlink()
+        wav_path.unlink(
+            missing_ok=True
+        )
 
         return FileResponse(
             path=str(mp3_path),
             media_type="audio/mpeg",
-            filename="speech.mp3",
+            filename="voice-clone.mp3",
             headers={
-                "X-Request-ID": request_id,
+                "X-Request-ID": request_id
             },
         )
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
 
         print(
-            f"[TTS] failed "
+            f"[VOICE CLONE] failed "
             f"request_id={request_id} "
             f"error={exc}"
         )
 
-        if wav_path.exists():
-            wav_path.unlink()
+        # ----------------------------------------------------
+        # Cleanup
+        # ----------------------------------------------------
 
-        if mp3_path.exists():
-            mp3_path.unlink()
+        for path in (
+            reference_path,
+            wav_path,
+            mp3_path,
+        ):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+        try:
+            request_dir.rmdir()
+        except OSError:
+            pass
 
         raise HTTPException(
             status_code=500,
-            detail=f"TTS generation failed: {exc}",
+            detail=(
+                f"Voice cloning failed: {exc}"
+            ),
         )
