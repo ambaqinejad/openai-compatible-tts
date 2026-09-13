@@ -17,7 +17,14 @@ services:
     ports:
       - "8003:8000"
 
-    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:
+                - gpu
 
     env_file:
       - .env

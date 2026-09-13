@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=omnivoice-base:latest
+ARG BASE_IMAGE=base-torch-ffmpeg:latest
 
 FROM ${BASE_IMAGE}
 
