@@ -9,7 +9,7 @@ from app.api.speech import router as speech_router
 
 from app.api.jobs import router as jobs_router
 from app.core.job_manager import TTSJobManager
-
+from app.core.text_normalizer import TextNormalizer
 
 model_manager = OmniVoiceModelManager()
 
@@ -22,6 +22,8 @@ job_manager = TTSJobManager(
     model_manager=model_manager,
     max_queue_size=settings.max_queue_size,
 )
+
+text_normalizer = TextNormalizer()
 
 
 @asynccontextmanager
@@ -36,6 +38,7 @@ async def lifespan(app: FastAPI):
         model_manager.load()
 
         app.state.model_manager = model_manager
+        app.state.text_normalizer = text_normalizer
 
         await tts_worker.start()
 

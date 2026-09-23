@@ -5,3 +5,4 @@ pydantic-settings
 numpy
 soundfile
 omnivoice
+httpx

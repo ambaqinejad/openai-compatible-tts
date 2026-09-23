@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     # Config
     # ============================================================
 
+    # ...
+
+    gemma_base_url: str = "http://192.168.100.10:8082/v1"
+    gemma_model: str = "gemma4"
+    gemma_timeout: float = 3600.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

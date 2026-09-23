@@ -17,10 +17,13 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.core.worker import TTSJob
+from app.core.text_normalizer import TextNormalizer
 
 from app.audio.chunker import chunk_text
 from app.audio.processor import concatenate_audio
 from app.audio.ffmpeg import convert_wav_to_mp3
+
+
 
 
 router = APIRouter(
@@ -148,8 +151,14 @@ async def create_speech(
     mp3_path = output_dir / f"{request_id}.mp3"
 
     try:
+        text_normalizer = request.app.state.text_normalizer
+
+        normalized_text = await text_normalizer.normalize(
+            body.input
+        )
+
         chunks = chunk_text(
-            body.input,
+            normalized_text,
             max_length=settings.max_chunk_characters,
         )
 
@@ -459,8 +468,13 @@ async def create_voice_clone(
         # Split long text
         # ----------------------------------------------------
 
+        text_normalizer = request.app.state.text_normalizer
+
+        normalized_text = await text_normalizer.normalize(
+            text
+        )
         chunks = chunk_text(
-            text,
+            normalized_text,
             max_length=settings.max_chunk_characters,
         )
 
